@@ -1,14 +1,15 @@
 # Metiri — AR Measure
 
 ## Active Context
-- Phase 0 is complete and verified: all four gates pass. Gate 0.3 ran on the
-  local emulator (AVD `metiri`, API 36) after WHPX turned out to be available;
-  Gate 0.4 was proven via a scratch repo + `git clone` in
-  `C:\msys64\tmp\opencode\metiri-clone` (build from a true clone of the
-  would-be Phase 0 commit). Only the literal remote form remains: commit +
-  push to Gitea, which is Sol's call.
-- Blockers: none for Phase 0. Phase 1 can start once Sol commits/pushes and the
-  remote-clone form of Gate 0.4 is confirmed.
+- Phase 0 AND Phase 1 are complete and verified. Phase 0: all four gates pass
+  in literal form (remote-clone gate ran against the pushed `a25ffee`).
+  Phase 1: 8/8 Rust tests + clippy clean, 5/5 instrumented tests on the
+  emulator (gate 1.6 FFI round-trip included). Committed as `a25ffee` is
+  Phase 0 only — Phase 1 changes are uncommitted in the working tree.
+- Blockers: none. Phase 2 (ARCore session + plane detection, Kotlin) is the
+  next phase; its gates need camera input, so the emulator will not cover
+  gate 2.3 (manual plane-detection checkpoint) — a physical device will be
+  needed there.
 
 ## TODO Board
 - [x] TASK-001: Amend plan (6 amendments) + move docs to `docs/`
@@ -17,9 +18,11 @@
 - [x] TASK-004: Phase 0 Android scaffold + Gate 0.2 (`cargo ndk`, 3 ABIs)
 - [x] TASK-005: App + androidTest APK build green (JNA dep added)
 - [x] TASK-006: Gate 0.3 — instrumented ping test PASSED on emulator `metiri` (AVD)
-- [ ] TASK-007: Commit + push Phase 0 to Gitea (Sol's call)
-- [ ] TASK-008: Gate 0.4 — commit + push, then confirm remote-clone build (local `git clone` equivalent ALREADY PROVEN in `C:\msys64\tmp\opencode\metiri-clone`)
-- [ ] TASK-009: Phase 1 — Rust geometry core (distance, confidence, enums, UniFFI round-trip)
+- [x] TASK-007: Commit + push Phase 0 to Gitea (committed as `a25ffee`, pushed)
+- [x] TASK-008: Gate 0.4 — remote-clone build PASSED against pushed `a25ffee` (emulator test included)
+- [x] TASK-009: Phase 1 — Rust geometry core (distance, confidence, enums, UniFFI round-trip): 8/8 Rust + 5/5 instrumented tests green
+- [ ] TASK-010: Commit + push Phase 1 (uncommitted in working tree — Sol's call)
+- [ ] TASK-011: Phase 2 — ARCore session + plane detection (Kotlin; gate 2.3 needs a physical device)
 
 ## Decisions Log
 | Date | Decision | Rationale |
@@ -32,6 +35,7 @@
 | 2026-08-16 | `Cargo.lock` committed at workspace root | Reproducible builds across the pinned toolchain |
 | 2026-08-16 | Build sequence runs from the repo root (not `cd core`) | Workspace `target/` lives at the root; `cd core` breaks bindgen's `--library` path (Gate 0.4 clean-copy catch) |
 | 2026-08-16 | Emulator is viable — WHPX works despite WMI `VirtualizationFirmwareEnabled=False` | `HypervisorPresent=True`, `emulator -accel-check` says WHPX usable; boots ~3 min. Phase 4+ ARCore still needs a physical device |
+| 2026-08-16 | Confidence table: FeaturePoint is always `Medium` (distance AND tracking have no effect); bracket is inclusive [0.5, 5.0]; NaN distance → out-of-bracket | Plan's gate 1.2 rule leaves these two spots open — flagged for Claude audit; encoded as a literal 12-arm match in `score_confidence` + duplicated in the table test |
 
 ## Agent Notes
 - Generated symbols: `ping()` is a **top-level function in package

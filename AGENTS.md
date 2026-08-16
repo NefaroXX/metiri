@@ -24,7 +24,7 @@
 - [x] TASK-009: Phase 1 — Rust geometry core (distance, confidence, enums, UniFFI round-trip): 8/8 Rust + 5/5 instrumented tests green
 - [x] TASK-010: Commit + push Phase 1 (committed as `396a11a`, pushed)
 - [x] TASK-011: Phase 2 — ARCore session + plane detection + capability screen: gates 2.1 (5/5 unit), 2.2 + 2.4 (OK 2 tests on SM-A205F), 2.3 (planes 1→2→3 on SM-A205F) all PASSED
-- [x] TASK-012: Commit + push Phase 2 (commit + push in progress)
+- [x] TASK-012: Commit + push Phase 2 (committed as `051488c`, pushed)
 - [ ] TASK-013: Phase 3 — raycast + point selection → wire into Rust core (starts after Phase 2 audit sign-off)
 
 ## Decisions Log

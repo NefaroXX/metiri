@@ -1,15 +1,16 @@
 # Metiri — AR Measure
 
 ## Active Context
-- Phase 0 AND Phase 1 are complete and verified. Phase 0: all four gates pass
-  in literal form (remote-clone gate ran against the pushed `a25ffee`).
-  Phase 1: 8/8 Rust tests + clippy clean, 5/5 instrumented tests on the
-  emulator (gate 1.6 FFI round-trip included). Committed as `a25ffee` is
-  Phase 0 only — Phase 1 changes are uncommitted in the working tree.
-- Blockers: none. Phase 2 (ARCore session + plane detection, Kotlin) is the
-  next phase; its gates need camera input, so the emulator will not cover
-  gate 2.3 (manual plane-detection checkpoint) — a physical device will be
-  needed there.
+- Phase 2 (ARCore session + plane detection) is COMPLETE: all four gates pass on
+  the physical device (Samsung Galaxy A20 SM-A205F, Android 11). Gate 2.1 unit
+  5/5; gates 2.2 + 2.4 instrumented `OK (2 tests)`; gate 2.3 manual checkpoint
+  demonstrated — planes tracked 1→2→3 live, overlay `Planes: 3`, screencap saved
+  (`/c/msys64/tmp/opencode/phone_planes_found.png`).
+- The android-36 google_apis x86_64 emulator's camera2 path is broken for our
+  app (camera1 works, camera2 characteristics fail with "Permission hard denied
+  ... packageName <unknown>" even with pm grant + appops) — do not re-investigate.
+- Next: commit + push Phase 2 (in progress), then Phase 3 (raycast + point
+  selection → wire into Rust core). Phase 3 needs the Phase 2 audit sign-off.
 
 ## TODO Board
 - [x] TASK-001: Amend plan (6 amendments) + move docs to `docs/`
@@ -21,8 +22,10 @@
 - [x] TASK-007: Commit + push Phase 0 to Gitea (committed as `a25ffee`, pushed)
 - [x] TASK-008: Gate 0.4 — remote-clone build PASSED against pushed `a25ffee` (emulator test included)
 - [x] TASK-009: Phase 1 — Rust geometry core (distance, confidence, enums, UniFFI round-trip): 8/8 Rust + 5/5 instrumented tests green
-- [ ] TASK-010: Commit + push Phase 1 (uncommitted in working tree — Sol's call)
-- [ ] TASK-011: Phase 2 — ARCore session + plane detection (Kotlin; gate 2.3 needs a physical device)
+- [x] TASK-010: Commit + push Phase 1 (committed as `396a11a`, pushed)
+- [x] TASK-011: Phase 2 — ARCore session + plane detection + capability screen: gates 2.1 (5/5 unit), 2.2 + 2.4 (OK 2 tests on SM-A205F), 2.3 (planes 1→2→3 on SM-A205F) all PASSED
+- [x] TASK-012: Commit + push Phase 2 (commit + push in progress)
+- [ ] TASK-013: Phase 3 — raycast + point selection → wire into Rust core (starts after Phase 2 audit sign-off)
 
 ## Decisions Log
 | Date | Decision | Rationale |
@@ -36,6 +39,9 @@
 | 2026-08-16 | Build sequence runs from the repo root (not `cd core`) | Workspace `target/` lives at the root; `cd core` breaks bindgen's `--library` path (Gate 0.4 clean-copy catch) |
 | 2026-08-16 | Emulator is viable — WHPX works despite WMI `VirtualizationFirmwareEnabled=False` | `HypervisorPresent=True`, `emulator -accel-check` says WHPX usable; boots ~3 min. Phase 4+ ARCore still needs a physical device |
 | 2026-08-16 | Confidence table: FeaturePoint is always `Medium` (distance AND tracking have no effect); bracket is inclusive [0.5, 5.0]; NaN distance → out-of-bracket | Plan's gate 1.2 rule leaves these two spots open — flagged for Claude audit; encoded as a literal 12-arm match in `score_confidence` + duplicated in the table test |
+| 2026-08-16 | ARCore client `com.google.ar:core:1.53.0` pinned; ARCore service 1.53.0 on BOTH emulator (x86 build) and device (arm64 build) | SDK client requires service ≥ 1.53; mismatched service versions are an extra variable to eliminate |
+| 2026-08-16 | Depth mode guarded: `isDepthModeSupported(AUTOMATIC)` else `DISABLED` | `Config.DepthMode.AUTOMATIC` unconditionally throws `UnsupportedConfigurationException` on devices without Depth support (observed on Galaxy A20 SM-A205F) |
+| 2026-08-16 | Phase 2 gates run on the physical device (SM-A205F), not the emulator | Emulator's camera2 path is broken on the android-36 google_apis x86_64 image: camera1 works, camera2 characteristics fail with "Permission hard denied ... packageName <unknown>" (pm grant + appops both ineffective) |
 
 ## Agent Notes
 - Generated symbols: `ping()` is a **top-level function in package
@@ -55,3 +61,22 @@
   `metiri` AVD is the default when no physical device is plugged in.
 - `.sisyphus/` is orchestrator runtime state — gitignored, not project content.
 - The plan lives at `docs/plan.md` (moved from repo root during Phase 0).
+- **Emulator camera2 is broken on android-36 google_apis x86_64** (2026 image):
+  the camera service hard-denies camera2 permission attribution for our app
+  (`packageName "<unknown>"`), camera1 legacy API works (built-in camera app
+  opens device 10). Do NOT re-investigate; use a physical device for AR gates.
+- **Physical device**: `RZ8MA00W9TN` = Samsung Galaxy A20 (SM-A205F), Android
+  11, arm64-v8a. ARCore 1.53.0 arm64 sideloaded (the `_x86_for_emulator` APK is
+  x86-only and silently fails to start its service on arm64 — use the plain
+  `Google_Play_Services_for_AR_1.53.0.apk`). Screen PIN 2980; `svc power
+  stayon true` + animations-off set for instrumented runs.
+- A20 VIO: officially ARCore-supported (added Aug 2020) but the tracker can
+  take minutes to leave initialization (`VisualInertialState is kNotTracking`)
+  — needs motion + texture + decent light; it DID eventually track (planes
+  1→2→3). Don't assume the device is broken on first try.
+- Phase 2 gate 2.3 evidence: `/c/msys64/tmp/opencode/phone_planes_found.png`
+  (overlay `Planes: 3`), instrument outputs `instr_phone1.txt` /
+  `instr_phone_final.txt` (`OK (2 tests)`), unit XML in
+  `android/app/build/test-results/testDebugUnitTest/`.
+- Emulator `metiri` AVD config was changed `hw.camera.front = none` →
+  `emulated` during the camera2 investigation; emulator is currently KILLED.

@@ -1,0 +1,11 @@
+[package]
+name = "core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# Pinned (Phase 0 deliverable): uniffi crate and uniffi-bindgen CLI must match exactly.
+uniffi = "=0.32.0"

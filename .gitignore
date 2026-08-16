@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/target/
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+android/captures/
+
+# Generated build artifacts (rebuilt by the documented build sequence)
+android/app/src/main/jniLibs/
+android/app/src/main/java/uniffi/
+android/app/src/main/java/core.kt
+
+# Local toolchain downloads
+*.zip
+
+# Orchestrator runtime state
+.sisyphus/
+
+# OS
+Thumbs.db
+.DS_Store

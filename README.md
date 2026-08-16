@@ -47,28 +47,31 @@ Nothing merges past a phase boundary without its gate tests passing.
 
 ## Getting started
 
-See [`docs/setup.md`](docs/setup.md) for toolchain requirements and the exact
-build sequence. Short version:
+See [`docs/setup.md`](docs/setup.md) for the pinned toolchain and the exact
+build sequence. Short version (set `ANDROID_HOME`, `ANDROID_NDK_HOME` and
+`JAVA_HOME` first — see setup.md):
 
 ```bash
 # Build Rust core for all Android ABIs + generate Kotlin bindings
-cd core
+# (run from the repo root — the workspace target/ dir is at the root)
 cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
-  -o ../android/app/src/main/jniLibs \
+  -o android/app/src/main/jniLibs \
   build --release
-cargo run --bin uniffi-bindgen generate \
+uniffi-bindgen generate \
   --library target/aarch64-linux-android/release/libcore.so \
   --language kotlin \
-  --out-dir ../android/app/src/main/java
+  --out-dir android/app/src/main/java
 
 # Build and test the Android app
-cd ../android
+cd android
 ./gradlew assembleDebug
+./gradlew assembleDebugAndroidTest
 ./gradlew connectedDebugAndroidTest
 ```
 
 Requirements: minSdkVersion 24 (ARCore "AR Required"), arm64-v8a build target
-mandatory. Details and rationale in `docs/setup.md`.
+mandatory. The Kotlin bindings need the JNA runtime dependency (already in
+`app/build.gradle.kts`). Details and rationale in `docs/setup.md`.
 
 ## Development workflow
 

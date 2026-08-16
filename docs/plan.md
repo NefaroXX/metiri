@@ -8,9 +8,9 @@ Role boundary: OpenCode implements. Every phase ends with a diff + test output
 handed back for Claude audit before merge. No phase is "done" on OpenCode's own
 assessment alone.
 
-Repo layout (Gitea, owner `sol`):
+Repo layout (Gitea: `sol/metiri` — local dir `metiri/`):
 ```
-ar-measure/
+metiri/
 ├── core/                  # Rust workspace member — geometry/measurement engine
 │   ├── src/
 │   │   ├── lib.rs
@@ -28,6 +28,24 @@ ar-measure/
 
 ---
 
+## Rough effort estimates (part-time; review cycles included)
+
+| Phase | Estimate | Primary risk |
+|---|---|---|
+| 0 — bootstrap | 1–2 days | toolchain installs, clean-clone build |
+| 1 — Rust core | 1–2 days | FFI enum/struct round-trip |
+| 2 — ARCore session | 2–4 days | emulator/device camera availability |
+| 3 — raycast + wiring | 2–3 days | real-world tap accuracy |
+| 4 — tracking quality | 1–2 days | none major |
+| 5 — Depth API | 2–3 days | Depth-capable test device |
+| 6 — persistence | 2–3 days | schema migration pattern |
+
+Gates over dates: these estimate review-cycle scheduling, not progress claims. If a
+phase's gate takes materially longer than estimated, that's a flag for Claude to
+investigate the plan, not an excuse to skip the gate.
+
+---
+
 ## Phase 0 — Workspace bootstrap
 
 **Scope**
@@ -36,11 +54,12 @@ ar-measure/
 - Empty Android Studio project (Kotlin, min SDK per current ARCore requirements — verify via web search, do not assume)
 - `cargo-ndk` + Gradle plugin wired so `core` builds to `.so` per ABI and lands in `android/app/src/main/jniLibs`
 - One trivial exported function: `pub fn ping() -> String { "pong".into() }`
+- **Pin every toolchain version as a Phase 0 deliverable**, recorded in `docs/setup.md` the moment it's chosen: Rust edition, `uniffi` crate + bindgen CLI versions (must match), NDK version, AGP, Kotlin, Gradle wrapper, JDK, minSdk/compileSdk. No floating "latest" anywhere — version drift between cargo-ndk, NDK, ARCore, and AGP is a known silent-breakage source.
 
 **Gate 0 tests** (OpenCode must produce and pass all before Phase 1):
 1. `cargo test -p core` passes (even with zero real tests, must compile clean, zero warnings)
 2. `cargo build -p core --target aarch64-linux-android` succeeds via cargo-ndk
-3. Android instrumented test: call `Core.ping()` from Kotlin, assert `"pong"` — must run on-device or emulator, not just compile
+3. Android instrumented test: call the exported `ping()` from Kotlin (generated symbol is the top-level `uniffi.core.ping` in the JNA backend — verified in Phase 0), assert `"pong"` — must run on-device or emulator, not just compile
 4. Fresh clone + build from scratch (`git clone` into tmp dir, run full build) succeeds with zero manual steps beyond documented setup — OpenCode records the exact command sequence in `docs/setup.md`
 
 **Do not proceed** until gate 4 passes on a clean clone. This catches "works on my machine" FFI toolchain drift early, before any real logic exists to blame it on.
@@ -93,8 +112,9 @@ ar-measure/
 
 **Scope**
 - Tap handler: screen coordinate → ARCore hit-test (plane hit only for this phase, per the MVP tightening — depth hit-test deferred to Phase 5)
+- Tap with **no hit-test result** (empty space, no plane detected yet): no-op — state stays where it is, never a transition, never a crash; a brief toast/hint is allowed but not required
 - Hit result → `Point3`, passed across FFI to `core::distance` or held pending second point
-- State machine per the design doc: `Idle → SelectingFirstPoint → Measuring{start} → Complete{start,end,distance}` — implement in Kotlin (sealed class) or Rust (exported enum), pick one, do not duplicate state in both layers
+- State machine per the design doc: `Idle → SelectingFirstPoint → Measuring{start} → Complete{start,end,distance}` — **implement as a Kotlin sealed class in the shell layer** (UI-flow state belongs with the UI per the architecture rationale; the Rust core stays stateless geometry). Do not duplicate state in both layers. (Decision made in plan review — do not revisit at implementation time.)
 - Live line render between first point and current camera-projected point while in `Measuring` state
 - Distance label showing live-updating `core::distance()` result in meters
 
@@ -161,3 +181,4 @@ ar-measure/
 - **Manual checkpoints are not optional.** Where a gate lists a manual checkpoint, OpenCode reports actual observed behavior (numbers, screenshots, or precise description) — "should work" is not a passing report.
 - **Scope creep guard.** Each phase's "non-goals" (explicit or implied by what's not listed) are enforced — a diff touching files outside the current phase's stated scope gets flagged back, not merged.
 - **Zero-warning policy on Rust** (`cargo clippy` clean) before any gate is considered passed, consistent with existing MIT Services / Concerto standards.
+- **No-panic rule across FFI.** The Rust core must never panic across the UniFFI boundary — a panic in exported code aborts the entire Android process, not just the call. All fallible paths return `Result`; no `unwrap()`/`expect()`/`panic!()` on data that can be influenced externally (measurements, user input, DB contents). Stated as an invariant for every phase — Gate 6.2 tests one instance of it, not the rule itself.

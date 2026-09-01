@@ -9,6 +9,7 @@ import com.google.ar.core.Anchor
 import com.google.ar.core.Frame
 import com.google.ar.core.HitResult
 import com.google.ar.core.Plane
+import com.google.ar.core.Point
 import com.google.ar.core.TrackingState
 import uniffi.core.Point3
 import javax.microedition.khronos.egl.EGLConfig
@@ -17,8 +18,9 @@ import javax.microedition.khronos.opengles.GL10
 /**
  * GLSurfaceView renderer: camera background passthrough + debug plane overlay
  * (Phase 2) plus Phase 3 measurement: consumes one-shot taps via [Frame.hitTest]
- * (plane hits only), creates anchors for accepted hits, and draws a live line +
- * distance while a measurement is in progress.
+ * (planes preferred, feature-point fallback when no plane is stable), creates
+ * anchors for accepted hits, and draws a live line + distance while a
+ * measurement is in progress.
  *
  * Session access is lazy (the session may be created after the GL thread
  * starts, since the capability flow is async) — texture/display setup is
@@ -130,14 +132,14 @@ class ArRenderer(
     }
 
     /**
-     * Consumes the one-shot tap (if any): hit-test, keep the nearest plane hit,
-     * create its anchor, and post the result. A tap with no plane hit posts
+     * Consumes the one-shot tap (if any): hit-test, keep the nearest hit,
+     * create its anchor, and post the result. A tap with no hit posts
      * [onTapMiss] (machine no-op). The pending tap is always cleared.
      */
     private fun consumePendingTap(frame: Frame) {
         val tap = pendingTapProvider() ?: return
         clearPendingTap()
-        val hit = nearestPlaneHit(frame, tap[0], tap[1])
+        val hit = nearestHit(frame, tap[0], tap[1])
         if (hit == null) {
             onTapMiss()
             return
@@ -169,7 +171,7 @@ class ArRenderer(
         when (state) {
             is MeasureState.Measuring -> {
                 val last = lastTouchProvider() ?: return
-                val hit = nearestPlaneHit(frame, last[0], last[1])
+                val hit = nearestHit(frame, last[0], last[1])
                 if (hit != null) {
                     val end = Point3(hit.hitPose.tx(), hit.hitPose.ty(), hit.hitPose.tz())
                     val distance = distanceFn(state.start, end)
@@ -195,21 +197,82 @@ class ArRenderer(
         }
     }
 
-    /** Nearest plane hit for a normalized tap position (origin top-left, y down). */
-    private fun nearestPlaneHit(frame: Frame, nx: Float, ny: Float): HitResult? {
+    /**
+     * Nearest hit for a normalized tap position (origin top-left, y down).
+     *
+     * Priority order:
+     * 1. Stable plane (area ≥ 0.08 m², pose inside polygon)
+     * 2. Any tracking plane (no area filter)
+     * 3. Feature-point with estimated surface normal (real surface when no plane exists)
+     * 4. Any tracking feature-point (last resort)
+     */
+    private fun nearestHit(frame: Frame, nx: Float, ny: Float): HitResult? {
         val hits = frame.hitTest(nx * viewWidth, ny * viewHeight)
-        val planeHits = hits.filter {
-            it.trackable is Plane && it.trackable.trackingState == TrackingState.TRACKING
+
+        // --- Tier 1: stable plane hits (area ≥ MIN_PLANE_AREA, pose in polygon) ---
+        val stablePlane = hits
+            .filter {
+                val p = it.trackable as? Plane ?: return@filter false
+                p.trackingState == TrackingState.TRACKING &&
+                    p.extentX * p.extentZ >= MIN_PLANE_AREA
+            }
+            .filter {
+                val p = it.trackable as Plane
+                try {
+                    p.isPoseInPolygon(it.hitPose)
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            .minByOrNull { it.distance }
+        if (stablePlane != null) {
+            logFirstHit(stable = true, point = false)
+            return stablePlane
         }
-        // Prefer stable planes (extent ≥ 0.08 m²) to avoid tiny floating fragments.
-        val stable = planeHits.filter {
-            val p = it.trackable as Plane
-            p.extentX * p.extentZ >= MIN_PLANE_AREA
-        }.minByOrNull { it.distance }
-        if (stable != null) return stable
-        // Fallback: nearest among all tracking planes so we don't return null
-        // while stable planes are still forming.
-        return planeHits.minByOrNull { it.distance }
+
+        // --- Tier 2: any tracking plane (no area filter) ---
+        val anyPlane = hits
+            .filter {
+                it.trackable is Plane && it.trackable.trackingState == TrackingState.TRACKING
+            }
+            .minByOrNull { it.distance }
+        if (anyPlane != null) {
+            logFirstHit(stable = false, point = false)
+            return anyPlane
+        }
+
+        // --- Tier 3: feature-point with estimated surface normal ---
+        val normalPoint = hits
+            .filter {
+                val pt = it.trackable as? Point ?: return@filter false
+                pt.trackingState == TrackingState.TRACKING &&
+                    pt.orientationMode == Point.OrientationMode.ESTIMATED_SURFACE_NORMAL
+            }
+            .minByOrNull { it.distance }
+        if (normalPoint != null) {
+            logFirstHit(stable = false, point = true)
+            return normalPoint
+        }
+
+        // --- Tier 4: any tracking feature-point (last resort) ---
+        val anyPoint = hits
+            .filter {
+                it.trackable is Point && it.trackable.trackingState == TrackingState.TRACKING
+            }
+            .minByOrNull { it.distance }
+        if (anyPoint != null) {
+            logFirstHit(stable = false, point = true)
+        }
+        return anyPoint
+    }
+
+    /** One-line log on the first hit of the session to confirm the fallback tier. */
+    private var firstHitLogged = false
+    private fun logFirstHit(stable: Boolean, point: Boolean) {
+        if (!firstHitLogged) {
+            firstHitLogged = true
+            Log.d(TAG, "firstHit planeStable=$stable pointFallback=$point")
+        }
     }
 
     private fun createOesTexture(): Int {

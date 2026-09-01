@@ -1,184 +1,347 @@
-# AR Measure — Gated Implementation Plan
+# Metiri — Revised Plan (WIP — 2026-09-01)
 
-Target: Android AR measurement app. Rust geometry/measurement core (via UniFFI) +
-Kotlin ARCore/UI shell. Each phase has an explicit exit gate — OpenCode must not
-proceed to the next phase until the gate's tests pass and are shown passing.
+> **Status: WIP — pending oracle revisions (failure strategy, ARCore VIO role, MVP cut). Do not treat as final.**
+>
+> This document replaces the previous gated ARCore-plane plan. The old plan is
+> archived at `docs/plan.prev.md` for reference.
+>
+> **Revision notes — open items flagged by oracle review:**
+> - **Missing failure strategy**: What happens when no acquisition layer can produce a
+>   valid point? Needs explicit degrade/fallback UX, not just silent failure.
+> - **Premature SpatialProvider abstraction**: The `SpatialProvider` trait is designed
+>   before any provider is implemented. Risk of over-engineering. Consider deferring
+>   the abstraction until ≥2 providers exist.
+> - **10C depth probe uncertain**: Using the iPhone 10C's second (telephoto) camera for
+>   stereo depth is unproven. ARKit's dual-camera API is not directly available on
+>   Android. Needs proof-of-concept before commitment.
+> - **Monocular ML depth estimation**: Listed as a possible acquisition layer but is
+>   speculative — no production ML depth model runs real-time on A20-class hardware
+>   today. Treat as research spike, not implementation target.
 
-Role boundary: OpenCode implements. Every phase ends with a diff + test output
-handed back for Claude audit before merge. No phase is "done" on OpenCode's own
-assessment alone.
+---
 
-Repo layout (Gitea: `sol/metiri` — local dir `metiri/`):
+## 1. Target UX
+
+The app measures real-world distances by tapping two points in 3D space. The user
+holds the phone, sees the camera feed, taps point A, taps point B, and gets a
+distance in meters with a confidence indicator.
+
+**Core interaction loop:**
+1. Open app → camera feed with reticle
+2. Tap first point → marker appears (green)
+3. Tap second point → line drawn, distance displayed
+4. Tap "Measure" again → resets for next measurement
+
+**What changes from the old plan:**
+- Measurement is no longer gated on ARCore plane detection. Points can be placed
+  anywhere in 3D space — on a wall, in mid-air anchored to a visual feature, on
+  a floor without a detected plane.
+- The system maintains a persistent world map so measurements survive session restarts
+  and points can be re-referenced.
+- ARCore is one input source, not the system backbone.
+
+---
+
+## 2. Architecture
+
 ```
-metiri/
-├── core/                  # Rust workspace member — geometry/measurement engine
-│   ├── src/
-│   │   ├── lib.rs
-│   │   ├── point.rs
-│   │   ├── measurement.rs
-│   │   ├── confidence.rs
-│   │   └── uniffi_bindings.udl (or proc-macro exports)
-│   └── Cargo.toml
-├── android/                # Kotlin app module
-│   └── app/src/main/java/.../
-├── xtask/                  # cargo-ndk build orchestration if needed
-└── docs/
-    └── plan.md             # this file
+┌──────────────────────────────────────────────────────────┐
+│                        Kotlin Shell                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  AR Renderer  │  │  Tap Handler  │  │   UI Layer   │   │
+│  │  (GL Surface) │  │  (hit-test)   │  │  (markers,   │   │
+│  │               │  │               │  │   labels)    │   │
+│  └──────┬───────┘  └──────┬───────┘  └──────────────┘   │
+│         │                  │                               │
+│  ┌──────┴──────────────────┴───────────────────────────┐  │
+│  │              SpatialProvider (trait)                  │  │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌──────────┐  │  │
+│  │  │ ARCore  │ │ Stereo  │ │  Depth  │ │ Monocular│  │  │
+│  │  │ Provider│ │ Provider│ │ Fusion  │ │    ML    │  │  │
+│  │  └─────────┘ └─────────┘ └─────────┘ └──────────┘  │  │
+│  └──────────────────────┬──────────────────────────────┘  │
+│                         │                                   │
+│  ┌──────────────────────┴──────────────────────────────┐  │
+│  │           Persistent World Map (Rust)                 │  │
+│  │  Points, descriptors, pose graph, session history     │  │
+│  └──────────────────────┬──────────────────────────────┘  │
+└─────────────────────────┼────────────────────────────────┘
+                          │ UniFFI
+┌─────────────────────────┴────────────────────────────────┐
+│                    Measurement Engine (Rust)               │
+│  distance(), confidence scoring, point management,        │
+│  world-map queries, persistence (SQLite)                  │
+└──────────────────────────────────────────────────────────┘
 ```
 
----
-
-## Rough effort estimates (part-time; review cycles included)
-
-| Phase | Estimate | Primary risk |
-|---|---|---|
-| 0 — bootstrap | 1–2 days | toolchain installs, clean-clone build |
-| 1 — Rust core | 1–2 days | FFI enum/struct round-trip |
-| 2 — ARCore session | 2–4 days | emulator/device camera availability |
-| 3 — raycast + wiring | 2–3 days | real-world tap accuracy |
-| 4 — tracking quality | 1–2 days | none major |
-| 5 — Depth API | 2–3 days | Depth-capable test device |
-| 6 — persistence | 2–3 days | schema migration pattern |
-
-Gates over dates: these estimate review-cycle scheduling, not progress claims. If a
-phase's gate takes materially longer than estimated, that's a flag for Claude to
-investigate the plan, not an excuse to skip the gate.
+**Key principle:** The Kotlin shell handles rendering, input, and AR-session
+lifecycle. The Rust core owns the world model, measurement logic, and
+persistence. The `SpatialProvider` trait bridges AR-session data into the world
+map.
 
 ---
 
-## Phase 0 — Workspace bootstrap
+## 3. Exploit 10C Second Camera
 
-**Scope**
-- `cargo new --lib core`, workspace `Cargo.toml`
-- Add `uniffi` dependency, `uniffi::setup_scaffolding!()` in `lib.rs`
-- Empty Android Studio project (Kotlin, min SDK per current ARCore requirements — verify via web search, do not assume)
-- `cargo-ndk` + Gradle plugin wired so `core` builds to `.so` per ABI and lands in `android/app/src/main/jniLibs`
-- One trivial exported function: `pub fn ping() -> String { "pong".into() }`
-- **Pin every toolchain version as a Phase 0 deliverable**, recorded in `docs/setup.md` the moment it's chosen: Rust edition, `uniffi` crate + bindgen CLI versions (must match), NDK version, AGP, Kotlin, Gradle wrapper, JDK, minSdk/compileSdk. No floating "latest" anywhere — version drift between cargo-ndk, NDK, ARCore, and AGP is a known silent-breakage source.
+The Samsung Galaxy A20 (SM-A205F) has a single rear camera. However, the target
+device ecosystem includes phones with dual cameras (e.g., iPhone 10C with
+wide + telephoto). On such devices:
 
-**Gate 0 tests** (OpenCode must produce and pass all before Phase 1):
-1. `cargo test -p core` passes (even with zero real tests, must compile clean, zero warnings)
-2. `cargo build -p core --target aarch64-linux-android` succeeds via cargo-ndk
-3. Android instrumented test: call the exported `ping()` from Kotlin (generated symbol is the top-level `uniffi.core.ping` in the JNA backend — verified in Phase 0), assert `"pong"` — must run on-device or emulator, not just compile
-4. Fresh clone + build from scratch (`git clone` into tmp dir, run full build) succeeds with zero manual steps beyond documented setup — OpenCode records the exact command sequence in `docs/setup.md`
+- Use the dual-camera pair for stereo depth estimation — compute depth from the
+  baseline offset between the two lenses
+- This gives hardware depth without requiring a ToF/structured-light sensor
+- The depth map feeds into the Persistent World Map as a high-confidence point source
 
-**Do not proceed** until gate 4 passes on a clean clone. This catches "works on my machine" FFI toolchain drift early, before any real logic exists to blame it on.
+**Caveat (oracle flag):** ARKit's `ARFaceTrackingConfiguration` exposes both cameras,
+but Android's Camera2 API does not guarantee simultaneous output from both lenses.
+This needs a proof-of-concept before committing to it as a primary path. For the
+A20 (single camera), this layer is unavailable — the system must work without it.
 
 ---
 
-## Phase 1 — Rust geometry core (no ARCore, no UI)
+## 4. Fallbacks
 
-**Scope**
-- `Point3 { x: f32, y: f32, z: f32 }`
-- `distance(a: Point3, b: Point3) -> f32` — straight Euclidean
-- `Confidence { High, Medium, Low }`
-- `MeasurementSource { Depth, Plane, FeaturePoint }`
-- `Measurement { start: Point3, end: Point3, distance: f32, confidence: Confidence, source: MeasurementSource }`
-- Confidence-scoring function: given `MeasurementSource`, camera-to-point distance (meters), and tracking-quality flag, return `Confidence`. Bracket rule: distance outside 0.5m–5.0m from camera → downgrade one confidence tier (never below `Low`); `FeaturePoint` source caps at `Medium` regardless of distance; `Depth` source with in-bracket distance and good tracking → `High`.
-- All exported via `#[uniffi::export]`
+The system degrades gracefully through acquisition layers:
 
-**Gate 1 tests** (Rust-only, `cargo test -p core`, no device needed):
-1. `distance()` unit tests: known 3-4-5 triangle, zero-distance (same point), negative coordinates, large coordinates (>1000m) don't overflow/NaN
-2. Confidence scoring table test — parametrized over all `(source, distance_bracket, tracking_ok)` combinations, asserting exact expected tier per the rule above (this is the one Claude will audit hardest — the rule must be mechanically checkable, not vibes)
-3. Property test (use `proptest` or manual fuzz loop): `distance(a, b) == distance(b, a)` for 1000 random point pairs (symmetry)
-4. Property test: `distance(a, a) == 0.0` for 1000 random points
-5. Serialization round-trip if `Measurement` is persisted later — skip for now, flag as TODO comment only, do not implement persistence in this phase (scope creep guard)
-6. UniFFI binding smoke test from Kotlin: construct a `Measurement`, read back each field, confirm enum variants cross the FFI boundary correctly (this is the actual risk area per the UniFFI research — enums and structs must round-trip cleanly)
+| Priority | Layer | Hardware Required | Accuracy | A20 Support |
+|----------|-------|-------------------|----------|-------------|
+| 1 | Hardware Depth (ToF/structured light) | Depth sensor | Highest | No |
+| 2 | Stereo Depth | Dual cameras | High | No |
+| 3 | ARCore + VIO | ARCore-supported device | Medium | Yes |
+| 4 | Monocular ML depth | None (CPU/GPU inference) | Low–Medium | Speculative |
+| 5 | User-assisted (known-distance calibration) | None | Variable | Yes |
 
-**Explicit non-goals for this phase** (OpenCode must not touch): no ARCore, no rendering, no raycasting, no persistence. If OpenCode's diff touches anything outside `core/`, reject and re-scope.
+**Fallback chain:** When a higher-priority layer fails or is unavailable, the
+system drops to the next. Each measurement records which source provided the
+depth, feeding into confidence scoring.
 
----
-
-## Phase 2 — ARCore session + plane detection (Kotlin, no measurement logic yet)
-
-**Scope**
-- `ArSession` wrapper: init, permission handling, lifecycle (pause/resume tied to Activity)
-- Enable plane detection (horizontal + vertical)
-- Camera preview rendering (GL surface or CameraX passthrough per ARCore sample pattern)
-- Device capability check screen: report ARCore support, Depth API support, sensor availability — matches the "device capabilities" table from the design doc — before allowing entry into measure mode
-- **No point selection, no measurement, no line rendering yet**
-
-**Gate 2 tests**:
-1. Unit test (Robolectric or similar): capability-check logic returns correct booleans given mocked `Session` support flags — all four combinations of (ARCore supported × Depth supported)
-2. Instrumented test: app launches, requests camera permission, session initializes without crash on the actual test device/emulator used
-3. Manual verification checkpoint (OpenCode cannot automate this — must report to Claude with a screen recording or description): point camera at a real flat surface, confirm ARCore plane detection visually indicates a plane found (log output or debug overlay is acceptable, doesn't need polished UI yet)
-4. Session correctly pauses/resumes across an Activity lifecycle test (rotate device or background/foreground the app) without leaking the native session or crashing
-
-**Gate 2 is the first one requiring physical/emulator device interaction with real camera input — flag to Sol if CI/emulator lacks camera passthrough support, this may need to run on Sol's physical device rather than fully automated.**
+**A20-specific path:** On the A20, the primary path is ARCore VIO (layer 3).
+Layer 4 (monocular ML) is a research spike. Layer 5 (user-assisted) is the
+last-resort MVP.
 
 ---
 
-## Phase 3 — Raycast + point selection → wire into Rust core
+## 5. A20 World Model
 
-**Scope**
-- Tap handler: screen coordinate → ARCore hit-test (plane hit only for this phase, per the MVP tightening — depth hit-test deferred to Phase 5)
-- Tap with **no hit-test result** (empty space, no plane detected yet): no-op — state stays where it is, never a transition, never a crash; a brief toast/hint is allowed but not required
-- Hit result → `Point3`, passed across FFI to `core::distance` or held pending second point
-- State machine per the design doc: `Idle → SelectingFirstPoint → Measuring{start} → Complete{start,end,distance}` — **implement as a Kotlin sealed class in the shell layer** (UI-flow state belongs with the UI per the architecture rationale; the Rust core stays stateless geometry). Do not duplicate state in both layers. (Decision made in plan review — do not revisit at implementation time.)
-- Live line render between first point and current camera-projected point while in `Measuring` state
-- Distance label showing live-updating `core::distance()` result in meters
+The A20's ARCore VIO is the primary spatial input on this device. Key
+observations from Phase 2–3 testing:
 
-**Gate 3 tests**:
-1. State machine unit tests: every legal transition succeeds, every illegal transition (e.g. second tap while `Idle`) is a no-op or explicit rejection, not a crash — enumerate all transition pairs, not just happy path
-2. Instrumented test: simulated tap events (MotionEvent injection) on a plane-detected scene produce a `Complete` state with non-null `Measurement`
-3. Cross-FFI test: measurement distance computed via Rust core matches an independently-computed reference value (compute expected distance in the test itself from known ARCore pose data, compare within float epsilon)
-4. Manual checkpoint: two taps ~1m apart on a real flat surface (e.g. desk) produce a displayed measurement within reasonable real-world tolerance (report actual vs. expected to Claude — this is where tracking accuracy in practice gets validated, not just logic)
-5. Reset/cancel path: mid-measurement cancel returns cleanly to `Idle`, no dangling AR anchors leaking (check anchor count before/after)
+- **Motion is mandatory.** Stationary warm-up stays at `kNotTracking` indefinitely.
+  The user must actively move the phone for VIO to initialize.
+- **Planes are intermittent.** Flicker 1→0→1, fragments intersect/overlap,
+  measurements float. The plane detection itself is not the measurement
+  system — it's one possible hit-test source.
+- **Core distance is accurate.** The tile test (33cm → 32cm, −3%) proves the
+  Rust geometry works when a hit lands on a stable surface.
+- **VIO takes minutes to initialize** on the A20. Needs motion + texture + light.
 
----
-
-## Phase 4 — Tracking quality + measurement validation
-
-**Scope**
-- Subscribe to ARCore `TrackingState` per frame (poll-based, per the FFI research — do not push per-frame data across UniFFI callbacks)
-- Reject/flag measurements per the design doc's validation list: tracking lost, insufficient feature points, excessive camera motion during the two taps
-- Surface confidence tier (from Phase 1's Rust scoring) in the UI label ("High confidence" / "Move closer to improve accuracy")
-- Distance-from-camera check feeding the 0.5m–5m bracket rule from Phase 1
-
-**Gate 4 tests**:
-1. Unit test: tracking-state transitions (Normal → Limited → Normal) correctly gate whether a tap is accepted
-2. Unit test: simulated "excessive motion between taps" (mock large pose delta) correctly downgrades or rejects the measurement
-3. Confidence tier displayed in UI matches what Rust core would independently compute for the same synthetic inputs — this is an integration test bridging Phase 1's unit-tested logic to the actual UI, catches "logic is right but wiring is wrong"
-4. Manual checkpoint: deliberately shake the device mid-measurement, confirm the app surfaces a "tracking lost" state rather than silently returning a bad number
+**Strategy:** Don't fight ARCore's plane instability. Instead:
+1. Use ARCore VIO for camera pose tracking (it's good at this)
+2. Use ARCore hit-test as one spatial provider, but not the only one
+3. Anchor points to visual features, not planes
+4. Fuse multiple observations of the same point over time to improve accuracy
 
 ---
 
-## Phase 5 — Depth API hit-test + Raw Depth for higher-accuracy point selection
+## 6. Persistent Points
 
-**Scope**
-- Enable Depth API, check per-device support (already surfaced in Phase 2's capability screen)
-- Raycast priority order per design doc: Depth hit → Plane hit → Feature point hit → fail
-- `MeasurementSource` on the resulting `Measurement` correctly reflects which tier was used
-- Raw Depth API specifically for the 0.5m–5m accuracy bracket, not the smoothed depth map, per the research above
+Instead of ephemeral plane-based measurements, the system maintains a persistent
+world map of 3D points:
 
-**Gate 5 tests**:
-1. Unit test: raycast fallback chain — mock each tier failing in sequence, confirm it falls through correctly and never silently returns null when a lower tier would have succeeded
-2. Instrumented test: on a Depth-API-capable device/emulator, a tap resolves to `MeasurementSource::Depth`; on a mocked non-Depth-capable path, same tap resolves to `MeasurementSource::Plane`
-3. Manual checkpoint: compare a Depth-sourced measurement against a Plane-sourced measurement of the same real-world distance — Depth should be equal or more accurate, report both to Claude
-4. Confirm confidence tier from Phase 1 responds correctly to the now-real `MeasurementSource` value (this was stub-tested in Phase 1 with synthetic enums — now test with real ARCore-derived sources)
+**Point lifecycle:**
+1. **Observed** — A point is first detected (via any acquisition layer)
+2. **Tracked** — The point is re-observed across frames, improving its position estimate
+3. **Confirmed** — The point has enough observations to be reliable
+4. **Measured** — The user has tapped this point as a measurement endpoint
 
----
+**Persistence:**
+- Points survive app restarts via SQLite (Rust core, `rusqlite`)
+- Each point stores: 3D position, descriptor (for re-identification), observation
+  count, confidence, creation timestamp, source layer
+- On relaunch, the system attempts to re-localize existing points against the
+  current camera view
 
-## Phase 6 — Persistence
-
-**Scope**
-- `MeasurementRepository` + local storage (SQLite via rusqlite in Rust core, consistent with Sol's existing stack preference)
-- Save/load a `Measurement` list, grouped by named "project" (per design doc's Living Room / Bedroom grouping example)
-- Serialization round-trip test deferred from Phase 1 — implement now
-
-**Gate 6 tests**:
-1. Rust unit test: save then load a `Measurement`, all fields including enums round-trip exactly
-2. Rust unit test: corrupt/missing DB file handled gracefully (no panic), returns typed error
-3. Instrumented test: save a measurement in the app, kill and relaunch the process, confirm it's still listed
-4. Migration test stub: even a single-version schema should have a documented migration path — OpenCode writes the first migration file even though there's nothing to migrate yet, so the pattern exists before Sol needs it under pressure later (matches the FlexiBooks migration pattern already in use)
+**Benefit:** A measurement taken today can be verified tomorrow. Points placed on
+a room's corners form a reusable spatial reference.
 
 ---
 
-## Cross-cutting rules for every phase (OpenCode must follow throughout)
+## 7. Depth Fusion
 
-- **No phase merges on OpenCode's self-assessment.** Diff + test output goes to Claude for audit first, matching Sol's existing role boundary.
-- **No skipping ahead.** If Phase 3 reveals Phase 1's confidence bracket is wrong in practice, fix Phase 1, re-run Phase 1's gate tests, then resume — don't patch around it in Phase 3.
-- **Manual checkpoints are not optional.** Where a gate lists a manual checkpoint, OpenCode reports actual observed behavior (numbers, screenshots, or precise description) — "should work" is not a passing report.
-- **Scope creep guard.** Each phase's "non-goals" (explicit or implied by what's not listed) are enforced — a diff touching files outside the current phase's stated scope gets flagged back, not merged.
-- **Zero-warning policy on Rust** (`cargo clippy` clean) before any gate is considered passed, consistent with existing MIT Services / Concerto standards.
-- **No-panic rule across FFI.** The Rust core must never panic across the UniFFI boundary — a panic in exported code aborts the entire Android process, not just the call. All fallible paths return `Result`; no `unwrap()`/`expect()`/`panic!()` on data that can be influenced externally (measurements, user input, DB contents). Stated as an invariant for every phase — Gate 6.2 tests one instance of it, not the rule itself.
+Multiple depth observations of the same 3D location are fused to improve accuracy:
+
+- **Temporal fusion:** Repeated observations of the same point across frames are
+  averaged (weighted by per-observation confidence)
+- **Cross-source fusion:** A point observed by both ARCore hit-test and stereo
+  depth gets a fused estimate with higher confidence
+- **Outlier rejection:** Observations that deviate significantly from the running
+  estimate are discarded (protects against tracking glitches)
+
+The fusion runs in the Rust core. It's a simple weighted average with outlier
+filtering — not a full SLAM back-end. The goal is accuracy improvement, not
+simultaneous localization and mapping.
+
+---
+
+## 8. SpatialProvider Abstraction
+
+A `SpatialProvider` trait in Kotlin (called from Rust via UniFFI) abstracts the
+source of 3D spatial data:
+
+```kotlin
+interface SpatialProvider {
+    val name: String
+    val isAvailable: Boolean
+    fun observePoint(screenX: Float, screenY: Float): Point3?
+    fun getCameraPose(): Pose?
+    fun getTrackingQuality(): TrackingQuality
+}
+```
+
+**Implementations:**
+- `ArCoreProvider` — wraps ARCore hit-test + tracking state
+- `StereoProvider` — dual-camera depth (future, device-dependent)
+- `DepthSensorProvider` — ToF/structured-light (future, device-dependent)
+- `MonocularMlProvider` — ML depth estimation (research spike)
+
+**Oracle flag:** This abstraction is designed before any provider beyond ARCore
+is implemented. Consider deferring the trait until a second provider exists.
+For now, the ARCore path can be called directly.
+
+---
+
+## 9. Development Order
+
+The revised plan builds bottom-up, starting from what's proven:
+
+### Phase R1 — Persistent Point Core (Rust)
+- Point struct with position, descriptor, observation history
+- Temporal fusion (weighted average, outlier rejection)
+- SQLite persistence for the world map
+- **Gate:** Unit tests for fusion accuracy, round-trip persistence
+
+### Phase R2 — ARCore VIO Provider
+- Use ARCore for camera pose tracking only (not planes)
+- Tap → ARCore hit-test → point observation → feed into world map
+- Refine the existing state machine to work with persistent points
+- **Gate:** Two taps produce a measurement; points survive app restart
+
+### Phase R3 — Point Re-identification
+- Visual descriptor matching for re-localizing points across sessions
+- Camera relaunch → match existing points to current view
+- **Gate:** Place points, restart app, confirm points are re-found
+
+### Phase R4 — Confidence + Validation
+- Confidence scoring using fused observation data
+- Tracking-quality gating (reject when VIO is unreliable)
+- Source-layer attribution in the measurement record
+- **Gate:** Confidence tiers match expected behavior; rejected taps are handled
+
+### Phase R5 — Advanced Depth (if device available)
+- Stereo depth on dual-camera devices
+- Hardware depth on ToF/structured-light devices
+- Cross-source fusion with ARCore observations
+- **Gate:** Depth-sourced measurements are equal or more accurate than ARCore-only
+
+### Phase R6 — Monocular ML Research Spike
+- Evaluate ML depth estimation models for real-time performance on A20
+- If viable: integrate as an additional acquisition layer
+- If not viable: document findings and remove from plan
+- **Gate:** Frame-rate benchmark on A20; accuracy comparison against ARCore
+
+### Phase R7 — Polish + Hardening
+- UI refinement (markers, line rendering, measurement history)
+- Error states and user feedback
+- Performance optimization
+- **Gate:** End-to-end UX walkthrough on A20
+
+---
+
+## 10. What We're Keeping from the Old Plan
+
+The following from the previous plan (Phases 0–3) is preserved and reusable:
+
+- **Rust core** (`core/src/lib.rs`) — `Point3`, `distance()`, `Confidence`,
+  `Measurement`, `scoreConfidence()` — all proven, all green
+- **UniFFI bindings** — JNA backend, toolchain pins, build pipeline
+- **Android scaffold** — Gradle config, ABIs, `jniLibs` wiring
+- **State machine** — `MeasureState.kt` sealed class, `MeasureMachine.transition()`
+  — the transition logic is sound; it needs re-wiring to persistent points
+- **Camera rendering** — `BackgroundRenderer`, `PlaneRenderer`, `LineRenderer`,
+  `MarkerRenderer` — the GL pipeline works
+- **Tap handling** — `MainActivity.handleTapAt` path, `pendingTap` → hit-test
+  → anchor → reducer — the plumbing is proven
+- **Instrumented test harness** — device gate runner, APK build, `adb instrument`
+
+---
+
+## 11. What We're Changing
+
+| Old Plan | Revised Plan |
+|----------|-------------|
+| ARCore plane detection = measurement source | ARCore VIO = camera pose tracker; planes = one hit-test option among many |
+| Ephemeral measurements (session-scoped) | Persistent world map (survives restarts) |
+| Single acquisition layer (ARCore Depth API) | Multiple layers with fallback chain |
+| Phase 5: Depth API as add-on | Depth is a first-class acquisition layer from Phase R1 |
+| Measurement = two taps on a plane | Measurement = two persistent points in 3D space |
+
+---
+
+## 12. Risk Register
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| A20 VIO too slow/unreliable for real-time tracking | Medium | High | Fallback to user-assisted measurement; A20 may not be the target device for v1 |
+| 10C stereo depth unworkable on Android | High | Low | Treat as bonus; not in MVP critical path |
+| Monocular ML too slow on A20 | High | Medium | Research spike only; don't commit resources until proven |
+| Persistent point re-identification fails across sessions | Medium | High | Visual descriptors need tuning; fallback to fresh-session-only mode |
+| `SpatialProvider` abstraction premature | Medium | Low | Can inline ARCore calls until second provider exists |
+| SQLite schema migration pain | Low | Medium | Phase R1 starts with the schema; migration pattern established early |
+
+---
+
+## 13. Success Criteria
+
+**MVP (Phase R1–R2):**
+- Tap two points → get a distance with confidence indicator
+- Measurement is accurate within ±5% for distances 0.5m–5m
+- Points persist across app restarts
+- Works on Samsung Galaxy A20 (SM-A205F)
+
+**Full Target (Phase R1–R5):**
+- Works on any ARCore-supported Android device
+- Dual-camera and depth-sensor devices get improved accuracy
+- Confidence scoring reflects actual measurement quality
+- World map survives multiple sessions and is re-localizable
+
+---
+
+## 14. Open Questions
+
+1. **A20 as target device?** The A20's VIO is slow and planes are unstable.
+   Should we target a more capable device for v1 and treat A20 as a
+   stretch goal?
+2. **Visual descriptor format?** ARCore's `AugmentedImage` database vs.
+   ORB/SIFT features vs. learned descriptors. Needs research.
+3. **World map size limits?** How many points can we store before SQLite
+   queries slow down? What's the pruning strategy?
+4. **Offline operation?** Does the app need to work without network, or is
+   cloud-assisted depth/SLAM acceptable?
+5. **Multi-device sync?** Is sharing a world map between two phones in scope?
+
+---
+
+---
+
+## Previous Plan (Pre-Revision) — for reference
+
+> The original gated plan (Phases 0–6, ARCore-plane-centric) is archived at
+> **`docs/plan.prev.md`**. Phases 0–3 were completed and committed
+> (`a25ffee` through `188c9bf`). Phases 4–6 were never started.
+>
+> Key takeaways carried forward:
+> - Rust core, UniFFI bindings, and the build pipeline are proven and reusable
+> - The state machine architecture is sound (Kotlin shell, Rust geometry)
+> - ARCore plane detection works but is too intermittent to be the measurement
+>   backbone — this is why we pivoted to persistent 3D world points
+> - The A20's camera stream was fixed (NDC UV bug) and is working correctly

@@ -2,6 +2,7 @@ package com.metiri.armeasure
 
 import android.opengl.GLES20
 import android.opengl.Matrix
+import android.util.Log
 import com.google.ar.core.Frame
 import com.google.ar.core.Plane
 import com.google.ar.core.Session
@@ -34,15 +35,17 @@ class PlaneRenderer {
         mvpUniform = GLES20.glGetUniformLocation(program, "u_Mvp")
         colorUniform = GLES20.glGetUniformLocation(program, "u_Color")
         positionAttribute = GLES20.glGetAttribLocation(program, "a_Position")
-        GLES20.glEnable(GLES20.GL_BLEND)
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
         checkGlError("plane init")
     }
 
     fun onDrawFrame(frame: Frame, session: Session, onPlaneFound: (Int) -> Unit) {
-        val tracked = session.getAllTrackables(Plane::class.java)
+        val allTracking = session.getAllTrackables(Plane::class.java)
             .filter { it.trackingState == TrackingState.TRACKING && it.polygon.limit() >= 9 }
+        val tracked = allTracking.filter { it.extentX * it.extentZ >= MIN_PLANE_AREA }
         if (tracked.size != lastReportedCount) {
+            if (allTracking.size != tracked.size) {
+                Log.d(TAG, "filtered ${allTracking.size} → ${tracked.size} planes (extent≥$MIN_PLANE_AREA m²)")
+            }
             lastReportedCount = tracked.size
             onPlaneFound(tracked.size)
         }
@@ -53,6 +56,11 @@ class PlaneRenderer {
         camera.getProjectionMatrix(projection, 0, 0.1f, 100.0f)
 
         GLES20.glUseProgram(program)
+        // Blend is scoped to the plane pass: the camera background is drawn
+        // with blending disabled (see BackgroundRenderer), so the plane fill
+        // alpha is re-enabled here and left on for the overlay pass after us.
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
         GLES20.glEnableVertexAttribArray(positionAttribute)
         for (plane in tracked) {
             val data = buildData(plane)
@@ -87,14 +95,17 @@ class PlaneRenderer {
             .apply { put(verts); position(0) }
 
         val color = when (plane.type) {
-            Plane.Type.HORIZONTAL_UPWARD_FACING -> floatArrayOf(0.29f, 0.86f, 0.73f, 0.35f)
-            Plane.Type.HORIZONTAL_DOWNWARD_FACING -> floatArrayOf(0.86f, 0.29f, 0.52f, 0.35f)
-            else -> floatArrayOf(0.55f, 0.35f, 0.90f, 0.35f)
+            Plane.Type.HORIZONTAL_UPWARD_FACING -> floatArrayOf(0.29f, 0.86f, 0.73f, 0.18f)
+            Plane.Type.HORIZONTAL_DOWNWARD_FACING -> floatArrayOf(0.86f, 0.29f, 0.52f, 0.18f)
+            else -> floatArrayOf(0.55f, 0.35f, 0.90f, 0.18f)
         }
         return PlaneData(color, buffer, triCount)
     }
 
     companion object {
+        private const val TAG = "ArMeasure.Planes"
+        /** Minimum plane area in m² (≈800 cm² ≈ 28×28 cm). */
+        private const val MIN_PLANE_AREA = 0.08f
         private const val VERTEX_SHADER = """
             uniform mat4 u_Mvp;
             attribute vec4 a_Position;

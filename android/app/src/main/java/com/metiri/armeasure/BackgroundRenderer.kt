@@ -2,6 +2,7 @@ package com.metiri.armeasure
 
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.util.Log
 import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Frame
 import java.nio.ByteBuffer
@@ -21,6 +22,7 @@ class BackgroundRenderer {
     private val quadVertices = floatArrayOf(-1f, -1f, 1f, -1f, 1f, 1f, -1f, 1f)
     private val quadIndices = shortArrayOf(0, 1, 2, 0, 2, 3)
     private val uvs = FloatArray(8)
+    private var uvsLogged = false
 
     private val vertexBuffer: FloatBuffer =
         ByteBuffer.allocateDirect(quadVertices.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
@@ -45,13 +47,32 @@ class BackgroundRenderer {
     }
 
     fun draw(frame: Frame) {
-        // ARCore fills in the texture coordinates for the current frame.
+        // The camera quad must NEVER be drawn with blending: the OES camera
+        // texture's alpha channel is 0 on some GPUs (e.g. Mali on the A20), so
+        // src*0 + dst*1 would leave only the dark clear color. Blend is
+        // managed per-pass by the render loop (planes/markers re-enable it).
+        GLES20.glDisable(GLES20.GL_BLEND)
+
+        // ARCore fills in the texture coordinates for the current frame: the
+        // INPUT must be the quad's NDC corners, otherwise the transform maps
+        // (0,0) to the texture center and the whole screen samples one texel
+        // (flat dark/blue field — the "no camera stream" bug on every device).
+        uvs[0] = -1f; uvs[1] = -1f
+        uvs[2] = 1f; uvs[3] = -1f
+        uvs[4] = 1f; uvs[5] = 1f
+        uvs[6] = -1f; uvs[7] = 1f
         frame.transformCoordinates2d(
             Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
             uvs,
             Coordinates2d.TEXTURE_NORMALIZED,
             uvs
         )
+        // Diagnostic: degenerate UVs (all 0) would mean the quad samples a
+        // single texel and the feed looks like a flat field. Log once.
+        if (!uvsLogged) {
+            uvsLogged = true
+            Log.i("ArMeasure.Background", "first-frame uvs: ${uvs.joinToString()} (texture $textureId)")
+        }
         uvBuffer.clear()
         uvBuffer.put(uvs)
         uvBuffer.position(0)
@@ -86,7 +107,7 @@ class BackgroundRenderer {
             uniform samplerExternalOES sTexture;
             varying vec2 v_TexCoord;
             void main() {
-                gl_FragColor = texture2D(sTexture, v_TexCoord);
+                gl_FragColor = vec4(texture2D(sTexture, v_TexCoord).rgb, 1.0);
             }
         """
     }

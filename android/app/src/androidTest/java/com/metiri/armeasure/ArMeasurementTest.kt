@@ -12,7 +12,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Gate 3.2: simulated taps on a plane-detected scene drive the machine through
+ * Gate 3.2: simulated taps on a live-tracked scene drive the machine through
  * the full path (touch -> hitTest -> anchor -> reducer) to a [MeasureState.Complete]
  * with a non-null, positive-distance measurement.
  *
@@ -47,8 +47,8 @@ class ArMeasurementTest {
 
     /**
      * Taps (normalized view coords) cycling through [positions] until [probe]
-     * passes. Retrying guards against a tap landing where no plane is currently
-     * hit (tracking wobble on the A20) without changing the code path.
+     * passes. Retrying guards against a tap landing where no feature point is
+     * currently hit (tracking wobble on the A20) without changing the code path.
      */
     private fun tapUntil(
         scenario: ActivityScenario<MainActivity>,
@@ -77,11 +77,12 @@ class ArMeasurementTest {
                 "AR session did not initialize",
                 waitFor(scenario) { it.sessionReady && it.sessionRunning }
             )
-            // A20 tracking can take minutes to leave initialization; planes may
-            // be slow to appear. (SM-A205F, see AGENTS.md)
+            // A20 tracking can take minutes to leave initialization; readiness
+            // is camera TRACKING (feature-point hits need it), not plane count —
+            // planes are debug-overlay only since gate 4.2. (SM-A205F, see AGENTS.md)
             assertTrue(
-                "no tracking plane detected within timeout",
-                waitFor(scenario, 240_000) { it.planeFoundCount > 0 }
+                "camera never reached TRACKING within timeout",
+                waitFor(scenario, 240_000) { it.cameraTracking }
             )
 
             // First tap: place the start point (auto-armed to SelectingFirstPoint

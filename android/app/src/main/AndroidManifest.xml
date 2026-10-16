@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- ARCore "AR Required": camera is mandatory, no non-AR fallback (see docs/setup.md) -->
+    <!-- Camera is mandatory; ARCore is NOT (plan 15.3 single universal APK):
+         ARCore-uncertified devices (e.g. Redmi 10C) install and run the same
+         APK on the sensor provider. See docs/setup.md. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature
         android:name="android.hardware.camera.ar"
-        android:required="true" />
+        android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -20,10 +22,12 @@
             </intent-filter>
         </activity>
 
-        <!-- Declared now (app is AR Required); read by the ARCore SDK from Phase 2 on -->
+        <!-- ARCore install-time gating OFF (plan 15.3): AR optional, so the
+             single universal APK installs on certified and uncertified devices
+             alike; the runtime SpatialProvider decides which pipeline runs. -->
         <meta-data
             android:name="com.google.ar.core"
-            android:value="required" />
+            android:value="optional" />
     </application>
 
 </manifest>

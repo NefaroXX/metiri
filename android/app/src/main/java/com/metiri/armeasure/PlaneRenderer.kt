@@ -13,6 +13,24 @@ import java.nio.FloatBuffer
 
 class PlaneRenderer {
 
+    /**
+     * Debug overlay switch (default OFF — planes are debug-only per gate 4.2;
+     * no gate may depend on plane output). While false, [onDrawFrame] skips
+     * both plane counting and all GL draws. Written on the GL thread from
+     * MainActivity's toggle via ArRenderer's provider.
+     *
+     * Disabling re-arms the count change-detection ([lastReportedCount]) so a
+     * re-enable re-emits the current count instead of showing a stale one —
+     * this lives in the setter because ArRenderer skips the draw call entirely
+     * while the overlay is off (the disabled branch in onDrawFrame is a guard
+     * of last resort).
+     */
+    var overlayEnabled: Boolean = false
+        set(value) {
+            if (!value) lastReportedCount = -1
+            field = value
+        }
+
     private class PlaneData(
         val color: FloatArray,
         val vertexBuffer: FloatBuffer,
@@ -39,6 +57,14 @@ class PlaneRenderer {
     }
 
     fun onDrawFrame(frame: Frame, session: Session, onPlaneFound: (Int) -> Unit) {
+        // Overlay off (default): neither draw nor count planes, so nothing in
+        // the app can report readiness from plane output (gate 4.2). Reset the
+        // change-detection so a re-enable re-emits the current count instead
+        // of leaving the UI with a stale one.
+        if (!overlayEnabled) {
+            lastReportedCount = -1
+            return
+        }
         val allTracking = session.getAllTrackables(Plane::class.java)
             .filter { it.trackingState == TrackingState.TRACKING && it.polygon.limit() >= 9 }
         val tracked = allTracking.filter { it.extentX * it.extentZ >= MIN_PLANE_AREA }

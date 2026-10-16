@@ -36,6 +36,11 @@ pub enum MeasurementSource {
     Depth,
     Plane,
     FeaturePoint,
+    /// Sensor-trig estimate — the gate 4.2 blank-wall fallback (accelerometer
+    /// pitch + stored user height + camera intrinsics, no ARCore hit).
+    /// Additive variant: appended LAST so existing FFI variant indices
+    /// (DEPTH/PLANE/FEATURE_POINT) keep their generated values.
+    Sensor,
 }
 
 /// A completed measurement between two points.
@@ -78,6 +83,10 @@ pub const DISTANCE_BRACKET_MAX_M: f32 = 5.0;
 /// | Plane         | no                      | yes         | Low        |
 /// | Plane         | no                      | no          | Low        |
 /// | FeaturePoint  | any                     | any         | Medium     |
+/// | Sensor        | yes                     | yes         | Medium     |
+/// | Sensor        | yes                     | no          | Low        |
+/// | Sensor        | no                      | yes         | Low        |
+/// | Sensor        | no                      | no          | Low        |
 ///
 /// Notes on the two places the plan leaves room:
 /// - "FeaturePoint caps at Medium **regardless of distance**" is read as
@@ -85,6 +94,10 @@ pub const DISTANCE_BRACKET_MAX_M: f32 = 5.0;
 /// - "Downgrade one tier, never below Low" is realized by the table above
 ///   (out-of-bracket Depth drops High→Medium and Medium→Low; Plane already
 ///   bottoms out at Low).
+/// - `Sensor` (gate 4.2 blank-wall estimate) mirrors the `Plane` row: an
+///   estimate never scores above Medium and drops to Low outside the bracket
+///   or when tracking is bad — deliberately identical to Plane so the UI can
+///   say "~estimated (Medium/Low)" using the same audited table.
 /// A NaN distance compares false against both bounds → treated as
 /// out-of-bracket.
 #[uniffi::export]
@@ -93,8 +106,7 @@ pub fn score_confidence(
     camera_distance_m: f32,
     tracking_ok: bool,
 ) -> Confidence {
-    let in_bracket =
-        (DISTANCE_BRACKET_MIN_M..=DISTANCE_BRACKET_MAX_M).contains(&camera_distance_m);
+    let in_bracket = (DISTANCE_BRACKET_MIN_M..=DISTANCE_BRACKET_MAX_M).contains(&camera_distance_m);
     match (source, in_bracket, tracking_ok) {
         (MeasurementSource::Depth, true, true) => Confidence::High,
         (MeasurementSource::Depth, true, false) => Confidence::Medium,
@@ -105,6 +117,12 @@ pub fn score_confidence(
         (MeasurementSource::Plane, false, true) => Confidence::Low,
         (MeasurementSource::Plane, false, false) => Confidence::Low,
         (MeasurementSource::FeaturePoint, _, _) => Confidence::Medium,
+        // Sensor estimate mirrors the Plane row: caps at Medium in-bracket
+        // with good tracking, Low otherwise (see score_confidence docs).
+        (MeasurementSource::Sensor, true, true) => Confidence::Medium,
+        (MeasurementSource::Sensor, true, false) => Confidence::Low,
+        (MeasurementSource::Sensor, false, true) => Confidence::Low,
+        (MeasurementSource::Sensor, false, false) => Confidence::Low,
     }
 }
 
@@ -148,35 +166,74 @@ mod tests {
 
     #[test]
     fn distance_known_345_triangle() {
-        let a = Point3 { x: 0.0, y: 0.0, z: 0.0 };
-        let b = Point3 { x: 3.0, y: 4.0, z: 0.0 };
+        let a = Point3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let b = Point3 {
+            x: 3.0,
+            y: 4.0,
+            z: 0.0,
+        };
         assert_close(distance(a, b), 5.0);
     }
 
     #[test]
     fn distance_zero_same_point() {
-        let p = Point3 { x: 1.5, y: -2.5, z: 3.5 };
+        let p = Point3 {
+            x: 1.5,
+            y: -2.5,
+            z: 3.5,
+        };
         assert_eq!(distance(p, p), 0.0);
     }
 
     #[test]
     fn distance_negative_coordinates() {
-        let a = Point3 { x: -1.0, y: -1.0, z: -1.0 };
-        let b = Point3 { x: 2.0, y: 3.0, z: -1.0 }; // dx -3, dy -4, dz 0
+        let a = Point3 {
+            x: -1.0,
+            y: -1.0,
+            z: -1.0,
+        };
+        let b = Point3 {
+            x: 2.0,
+            y: 3.0,
+            z: -1.0,
+        }; // dx -3, dy -4, dz 0
         assert_close(distance(a, b), 5.0);
     }
 
     #[test]
     fn distance_large_coordinates_no_overflow_or_nan() {
         // ~1000 km offsets, still a clean 3-4-5 (dx/dy exact in f32 at this scale).
-        let a = Point3 { x: 1_000_000.0, y: 0.0, z: 0.0 };
-        let b = Point3 { x: 1_000_003.0, y: 4.0, z: 0.0 };
+        let a = Point3 {
+            x: 1_000_000.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let b = Point3 {
+            x: 1_000_003.0,
+            y: 4.0,
+            z: 0.0,
+        };
         assert_close(distance(a, b), 5.0);
         // Beyond exactness (f32 ulp at 1e10 is 1024) — only finiteness matters.
-        let c = Point3 { x: 1e10, y: 0.0, z: 0.0 };
-        let d = Point3 { x: 1e10, y: 1e10, z: 1e10 };
+        let c = Point3 {
+            x: 1e10,
+            y: 0.0,
+            z: 0.0,
+        };
+        let d = Point3 {
+            x: 1e10,
+            y: 1e10,
+            z: 1e10,
+        };
         let big = distance(c, d);
-        assert!(big.is_finite() && big >= 0.0, "distance must stay finite: {big}");
+        assert!(
+            big.is_finite() && big >= 0.0,
+            "distance must stay finite: {big}"
+        );
     }
 
     // Gate 1.2 — confidence scoring table (the audited one)
@@ -200,6 +257,7 @@ mod tests {
                     MeasurementSource::Depth,
                     MeasurementSource::Plane,
                     MeasurementSource::FeaturePoint,
+                    MeasurementSource::Sensor,
                 ] {
                     let expected = match (source, in_bracket, tracking_ok) {
                         (MeasurementSource::Depth, true, true) => Confidence::High,
@@ -211,6 +269,10 @@ mod tests {
                         (MeasurementSource::Plane, false, true) => Confidence::Low,
                         (MeasurementSource::Plane, false, false) => Confidence::Low,
                         (MeasurementSource::FeaturePoint, _, _) => Confidence::Medium,
+                        (MeasurementSource::Sensor, true, true) => Confidence::Medium,
+                        (MeasurementSource::Sensor, true, false) => Confidence::Low,
+                        (MeasurementSource::Sensor, false, true) => Confidence::Low,
+                        (MeasurementSource::Sensor, false, false) => Confidence::Low,
                     };
                     expect_score(source, d, tracking_ok, expected);
                 }
@@ -223,6 +285,17 @@ mod tests {
         // NaN compares false against both bounds → out-of-bracket → downgrade.
         expect_score(MeasurementSource::Depth, f32::NAN, true, Confidence::Medium);
         expect_score(MeasurementSource::Plane, f32::NAN, true, Confidence::Low);
+        expect_score(MeasurementSource::Sensor, f32::NAN, true, Confidence::Low);
+    }
+
+    #[test]
+    fn sensor_estimate_never_scores_above_medium() {
+        // Gate 4.2: the blank-wall estimate is honestly capped — the best it
+        // can ever claim is Medium (in-bracket + tracking), never High.
+        expect_score(MeasurementSource::Sensor, 2.0, true, Confidence::Medium);
+        expect_score(MeasurementSource::Sensor, 7.0, true, Confidence::Low);
+        expect_score(MeasurementSource::Sensor, 2.0, false, Confidence::Low);
+        expect_score(MeasurementSource::Sensor, 0.2, false, Confidence::Low);
     }
 
     // Gate 1.3 + 1.4 — property tests, 1000 iterations each

@@ -10,9 +10,11 @@ import com.google.ar.core.Session
  * Phase 2 ARCore session wrapper: create/configure, pause/resume/close lifecycle
  * tied to the Activity, and capability queries.
  *
- * Plane finding is enabled for both horizontal and vertical planes. Depth mode
- * is AUTOMATIC only when the device supports it, else DISABLED — requesting
- * AUTOMATIC unconditionally makes [Session.configure] throw
+ * Plane finding is DISABLED ([Config.PlaneFindingMode.DISABLED], Phase 4
+ * plane-free config): hit tests fall back to feature points, so no planes are
+ * tracked as hit targets. Depth mode is AUTOMATIC only when the device
+ * supports it, else DISABLED — requesting AUTOMATIC unconditionally makes
+ * [Session.configure] throw
  * UnsupportedConfigurationException on devices without Depth support
  * (observed on Galaxy A20 / SM-A205F). Capability surfaced via
  * [hasDepthSupport] for the capability screen.
@@ -62,13 +64,13 @@ object ArSessionManager {
             }
             s.configure(
                 Config(s).apply {
-                    planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+                    planeFindingMode = Config.PlaneFindingMode.DISABLED
                     depthMode = depth
                 }
             )
             session = s
             ready = true
-            Log.i(TAG, "session created + configured (h+v planes, depth=$depth)")
+            Log.i(TAG, "session created + configured (plane finding DISABLED, depth=$depth)")
             s
         } catch (t: Throwable) {
             session = null

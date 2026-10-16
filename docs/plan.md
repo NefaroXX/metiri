@@ -345,3 +345,159 @@ The following from the previous plan (Phases 0–3) is preserved and reusable:
 > - ARCore plane detection works but is too intermittent to be the measurement
 >   backbone — this is why we pivoted to persistent 3D world points
 > - The A20's camera stream was fixed (NDC UV bug) and is working correctly
+
+---
+
+## 15. Phase 4 — Dual-Provider Measurement (redefined 2026-09-22)
+
+> **Status: authoritative as of 2026-09-22 (decision approved by Sol).** This
+> section redefines Phase 4 (original plan numbering: Phases 0–3 completed,
+> Phases 4–6 never started) as **dual-provider measurement**, gated by 4.1–4.6.
+> Every section above is historical and remains intact — nothing here rewrites
+> them. Where this conflicts with the near-term ordering of the revised-plan
+> phases in section 9 (R1–R7), Phase 4 is the concrete next implementation and
+> takes precedence; the R-phases remain the longer-term R&D roadmap.
+
+### 15.1 Why the redefinition
+
+- **Planes are broken on the test device.** ARCore plane detection on the Galaxy
+  A20 is intermittent — flicker 1→0→1, intersecting/overlapping fragments,
+  measurements can float — verified on-device 2026-08-18.
+- **Pose tracking is good.** The tile calibration (33 cm → 32 cm, −3%) proves the
+  VIO pose + Rust distance pipeline is accurate when a hit lands on a stable
+  surface.
+- **Conclusion:** measurable accuracy does not depend on plane output. Planes are
+  demoted to a debug overlay only; **no gate may depend on plane output**.
+- **Device-surface reality:** the publish rule (section 15.4) requires the app to
+  work on ARCore-*certified* and ARCore-*uncertified* devices. That forces a
+  second, sensor-only provider.
+
+> Naming note (discrepancy with earlier sections): the oracle revision in
+> sections 3 and 12 referred to a dual-camera "iPhone 10C" using stereo depth.
+> The actual second test device is the **Redmi 10C** (Snapdragon 680,
+> ARCore-*uncertified*). The stereo-depth exploit (section 3) does not apply to
+> it and is not part of Phase 4; Phase 4's Provider 2 is sensor-only. This note
+> documents the discrepancy; the earlier sections are preserved as history.
+
+### 15.2 Architecture: dual-provider
+
+Both providers implement the `SpatialProvider` interface already sketched in
+section 8 (`name`, `isAvailable`, `observePoint`, `getCameraPose`,
+`getTrackingQuality`) and feed `Point3` into the same `MeasureState` machine and
+Rust measurement core.
+
+**Provider 1 — ARCore without planes (certified devices, e.g. A20):**
+- Hit-test sources, in priority order: depth hits first, feature-point hits second.
+- `Config.PlaneFindingMode.DISABLED` — planes are never a measurement source.
+- `Config.DepthMode.AUTOMATIC` only when `isDepthModeSupported(AUTOMATIC)`, else
+  `DISABLED` (matches the existing decision in AGENTS.md).
+- Planes may be rendered as a debug overlay only, with a toggle; never a gate
+  dependency.
+
+> **Amended 2026-09-22 (see 15.7):** the probe found the A20 does **not** support
+> the Depth API, so the "depth hits first" tier above is **not available on the
+> test device** and Provider 1 runs on feature-point hits alone. `DepthMode` is
+> therefore `DISABLED` in practice; the `isDepthModeSupported` guard stays in place
+> so the depth tier lights up on any future depth-capable device without a code
+> change.
+
+**Provider 2 — sensor-only (uncertified devices, e.g. Redmi 10C):**
+- Zero `com.google.ar.core` imports; no ARCore session is started.
+- Inputs: camera (CameraX preview) + accelerometer trig — ground-span;
+  pitch-triangulation for vertical measurements; step-counter walk for
+  stride-based distance.
+- Adds **one** `MeasurementSource` variant in the Rust core for sensor-derived
+  points; everything downstream (state machine, distance, confidence) is shared.
+
+### 15.3 Manifest change
+
+- `com.google.ar.core` feature: **required → optional**
+  (`<uses-feature android:required="false">`).
+- Result: a single universal APK that installs and runs on certified and
+  uncertified devices alike. `minSdk 24` unchanged.
+
+### 15.4 Publish rule (hard acceptance)
+
+The app must work on the Galaxy A20, the Redmi 10C, **and a handful of friends'
+devices** — or it is not published. This is the acceptance bar for Phase 4's end
+state (gate 4.5).
+
+### 15.5 Gates 4.1–4.6
+
+| Gate | Scope | Pass criteria |
+|------|-------|---------------|
+| **4.1** | Depth probe on A20 (incl. frame-rate impact) — **probe DONE 2026-09-22 (see 15.7): the A20 does NOT support the Depth API, so "depth-capable pipeline" is unachievable as originally worded** | **RESOLVED:** selected pipeline = **feature-point hits** (no depth tier available on the A20); `DepthMode` stays `DISABLED`; frame-rate criterion **still applies** — **no performance regression >15%** |
+| **4.2** | Plane-free ARCore pipeline | `nearestHit` re-spec dropping plane tiers; config changes (`PlaneFindingMode.DISABLED`, guarded `DepthMode`); debug plane-overlay toggle; **A20 tile test ≤5% error**; **zero floating measurements across 3 runs**; JVM green |
+| **4.3** | Sensor provider module | Trig helpers in Rust core + CameraX preview + calibration flow; **10C tile test ≤8% uncalibrated / ≤5% calibrated, per mode**; **ARCore path never invoked** on 10C |
+| **4.4** | `SpatialProvider` + selection UX | Runtime auto-select + manual override + diagnostics screen + manifest flip to optional; **correct provider on both A20 and 10C**; unknown device triaged with no adb |
+| **4.5** | Friends' device trials | **3+ units**; diagnostics + tile test each; **correct provider + accuracy within the tier band** |
+| **4.6** | Audit → commit + push | Diff review against Phase 3–4 gates; evidence captured; commit + push |
+
+### 15.6 Provider-1 pose baseline
+
+The Phase 3 gate 3.4 result (TASK-018) — **tile 33 cm → app 32 cm (−3%)** —
+doubles as the Provider-1 pose baseline evidence behind gate 4.2's ≤5% bar.
+
+### 15.7 Probe outcomes (2026-09-22) — branch conditions closed, pipelines locked
+
+> Reported by Sol from on-device probes on 2026-09-22. These results close the
+> four open branch conditions named in gates 4.1 and 4.3 and **lock the pipeline
+> choices** for gates 4.2 and 4.3. Sections 15.1–15.6 are preserved as the
+> pre-probe record; this section is the resolution. Where the two disagree, this
+> section wins.
+
+| # | Probe | Device | Result | Consequence for Phase 4 |
+|---|-------|--------|--------|--------------------------|
+| 1 | Depth API support | Galaxy A20 (SM-A205F) | **Not supported** | Depth-first hit tier **abandoned**. Provider 1 = **feature-point hits**. `PlaneFindingMode.DISABLED` unchanged; `DepthMode` stays `DISABLED` in practice |
+| 2 | Gyroscope presence | Redmi 10C | **Effectively absent** — AIDA64 lists no gyro; only the SC7A20 accelerometer, whose x/y/z tilt response is expected accel-only behavior | Provider 2 derives pitch from **static accelerometer tilt only**; **no live rotation-vector/heading tracking** → **aim-and-tap** interaction |
+| 3 | Camera2 stream count | Redmi 10C | **1 front + 1 back visible to apps**; the aux 2MP depth camera is **not exposed** | **Stereo-depth path closed empirically** on the 10C (not merely unproven). Supersedes the "unproven" flag in sections 3 and 12 |
+| 4 | Step sensors | Redmi 10C | **Present** — Qualcomm step detector + step counter | **Walk-off mode via `TYPE_STEP_COUNTER` is viable**, gated on **stride calibration** |
+
+#### 15.7.1 Provider 1 (A20) — locked pipeline
+
+- Hit-test source: **feature points** (`Frame.hitTest` filtered to
+  `Trackable is FeaturePoint`), with pose from VIO.
+- `Config.PlaneFindingMode.DISABLED` — planes stay a debug overlay only, never a
+  measurement source, never a gate dependency.
+- `Config.DepthMode` resolves to `DISABLED` on this device; the
+  `isDepthModeSupported(AUTOMATIC)` guard is retained so the depth tier activates
+  automatically on any future depth-capable device.
+- **Known limitation (accepted):** feature points require texture. On a **blank or
+  untextured wall there is no feature point to hit**, so Provider 1 cannot measure
+  there. This is a documented product limitation with explicit "no point here"
+  feedback — not a reason to re-introduce a plane or depth tier.
+- Practical guidance for the 4.2 / 4.5 tile tests: textured surface, decent light,
+  slow motion (VIO still refuses to initialize when stationary — see sections 5
+  and 15.6).
+
+#### 15.7.2 Provider 2 (10C) — locked pipeline
+
+- **Sensor set, as probed:** accelerometer (SC7A20) + camera + step
+  detector/counter. No gyro. No usable depth camera.
+- **Aim mode (vertical + ground-span):** pitch is read from the **static
+  accelerometer tilt** (gravity vector). There is no live orientation tracking, so
+  the interaction is **aim-and-tap** — aim the phone, hold still for the pitch
+  sample to settle, then tap. The calibration flow and the ≤8% / ≤5% per-mode
+  bands in gate 4.3 are unchanged by this.
+- **Walk mode:** `TYPE_STEP_COUNTER` (Qualcomm) for stride-based distance. Needs
+  **stride calibration**, plus the `android.permission.ACTIVITY_RECOGNITION` runtime
+  grant on API 29+ (the 10C ships Android 11).
+- **Dropped:** stereo depth (probe 3). The `StereoProvider` in section 8 and the
+  stereo rows in sections 3, 4 and 12 remain as historical design notes; they are
+  out of Phase 4 scope and are not implementable on either test device.
+- Still zero `com.google.ar.core` imports and no ARCore session on this path.
+
+#### 15.7.3 Open items carried into 4.2 / 4.3
+
+1. Confirm at implementation time whether the 10C exposes
+   `TYPE_ROTATION_VECTOR` via its sensor HAL. Android can synthesize this from the
+   accelerometer (and magnetometer for heading) even without a gyro; if present it
+   may improve pitch stability over raw accel, though heading quality is
+   unverified. Until checked, assume accel-only.
+2. Define the stride-calibration UX for walk mode (height input vs. a measured
+   calibration walk) and pin which variant gate 4.3's ≤5% band is judged against.
+3. Decide the blank-wall degrade UX for Provider 1 (15.7.1) before 4.2's tile
+   test, so the ≤5% criterion is only claimed for textured surfaces.
+4. Gate 4.5 (friends' devices) should record, per device, which of the four probe
+   conditions hold. A friend device with a gyro or an exposed second camera could
+   justify a provider variant later, but that is out of Phase 4 scope.

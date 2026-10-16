@@ -1,5 +1,6 @@
 package com.metiri.armeasure
 
+import uniffi.core.MeasurementSource
 import uniffi.core.Point3
 
 /**
@@ -24,16 +25,46 @@ import uniffi.core.Point3
  * reducer never throws. `TapMiss` is a no-op everywhere. `Cancel` aborts an
  * in-progress measurement (SelectingFirstPoint/Measuring); `Reset` clears a
  * completed one. Both return to [MeasureState.Idle].
+ *
+ * Gate 4.2 addition (orthogonal to the table above): `TapHit` carries a
+ * [MeasurementSource] (default `FEATURE_POINT`; `SENSOR` = blank-wall
+ * ray-plane estimate). It is provenance only — it never changes which
+ * transition fires — and it is folded into `Complete.source` by the
+ * "any estimate ⇒ SENSOR" rule.
  */
 sealed interface MeasureState {
     object Idle : MeasureState
     object SelectingFirstPoint : MeasureState
-    data class Measuring(val start: Point3) : MeasureState
-    data class Complete(val start: Point3, val end: Point3, val distance: Float) : MeasureState
+    data class Measuring(
+        val start: Point3,
+        /** Source of the start point — [MeasurementSource.SENSOR] marks a blank-wall estimate. */
+        val startSource: MeasurementSource = MeasurementSource.FEATURE_POINT,
+    ) : MeasureState
+    data class Complete(
+        val start: Point3,
+        val end: Point3,
+        val distance: Float,
+        /**
+         * Combined source: [MeasurementSource.SENSOR] if EITHER endpoint is a
+         * sensor estimate, else [MeasurementSource.FEATURE_POINT]. The default
+         * keeps every pre-gate-4.2 construction/test unchanged (feature-point
+         * is the real-hit source — planes are disabled).
+         */
+        val source: MeasurementSource = MeasurementSource.FEATURE_POINT,
+    ) : MeasureState
 }
 
 sealed interface MeasureAction {
-    data class TapHit(val point: Point3) : MeasureAction
+    /**
+     * A tap that produced a point. [source] defaults to
+     * [MeasurementSource.FEATURE_POINT] (ARCore feature-point hit); the
+     * gate 4.2 blank-wall fallback passes [MeasurementSource.SENSOR] for a
+     * ray-plane estimate (no anchor exists for those).
+     */
+    data class TapHit(
+        val point: Point3,
+        val source: MeasurementSource = MeasurementSource.FEATURE_POINT,
+    ) : MeasureAction
     object TapMiss : MeasureAction
     object BeginMeasure : MeasureAction
     object Cancel : MeasureAction
@@ -64,7 +95,7 @@ object MeasureMachine {
         }
 
         MeasureState.SelectingFirstPoint -> when (action) {
-            is MeasureAction.TapHit -> MeasureState.Measuring(action.point)
+            is MeasureAction.TapHit -> MeasureState.Measuring(action.point, action.source)
             MeasureAction.TapMiss -> state
             MeasureAction.BeginMeasure -> state
             MeasureAction.Cancel -> MeasureState.Idle
@@ -76,6 +107,16 @@ object MeasureMachine {
                 start = state.start,
                 end = action.point,
                 distance = distanceFn(state.start, action.point),
+                // Honest combine: an estimate anywhere poisons the whole
+                // measurement's provenance (never cleaner than its worst point).
+                source = if (
+                    state.startSource == MeasurementSource.SENSOR ||
+                    action.source == MeasurementSource.SENSOR
+                ) {
+                    MeasurementSource.SENSOR
+                } else {
+                    MeasurementSource.FEATURE_POINT
+                },
             )
             MeasureAction.TapMiss -> state
             MeasureAction.BeginMeasure -> state

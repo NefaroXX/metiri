@@ -88,7 +88,8 @@ class ArMeasurementCancelTest {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         try {
             assertTrue("AR session did not initialize", waitFor(scenario) { it.sessionReady && it.sessionRunning })
-            assertTrue("no tracking plane detected", waitFor(scenario, 240_000) { it.planeFoundCount > 0 })
+            // Readiness = camera TRACKING; planes are debug-overlay only (gate 4.2).
+            assertTrue("camera never reached TRACKING", waitFor(scenario, 240_000) { it.cameraTracking })
 
             val baseline = sessionAnchorCount(scenario)
 
@@ -126,7 +127,8 @@ class ArMeasurementCancelTest {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         try {
             assertTrue("AR session did not initialize", waitFor(scenario) { it.sessionReady && it.sessionRunning })
-            assertTrue("no tracking plane detected", waitFor(scenario, 240_000) { it.planeFoundCount > 0 })
+            // Readiness = camera TRACKING; planes are debug-overlay only (gate 4.2).
+            assertTrue("camera never reached TRACKING", waitFor(scenario, 240_000) { it.cameraTracking })
 
             val baseline = sessionAnchorCount(scenario)
 

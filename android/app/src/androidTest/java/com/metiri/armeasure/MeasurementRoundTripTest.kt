@@ -85,4 +85,23 @@ class MeasurementRoundTripTest {
             scoreConfidence(MeasurementSource.PLANE, 8.0f, trackingOk = false),
         )
     }
+
+    /**
+     * Gate 4.2: the additive `Sensor` variant must round-trip the boundary
+     * with its own index (appended after FEATURE_POINT — see the setup doc's
+     * enum round-trip risk note) and score within its Low/Medium band.
+     */
+    @Test
+    fun sensorVariantRoundTripsTheBoundary() {
+        val m = Measurement(
+            start = Point3(0.0f, 1.0f, 0.0f),
+            end = Point3(0.0f, 1.0f, 2.0f),
+            distance = 2.0f,
+            confidence = Confidence.MEDIUM,
+            source = MeasurementSource.SENSOR,
+        )
+        assertEquals(MeasurementSource.SENSOR, m.source)
+        assertEquals(Confidence.MEDIUM, scoreConfidence(MeasurementSource.SENSOR, 2.0f, trackingOk = true))
+        assertEquals(Confidence.LOW, scoreConfidence(MeasurementSource.SENSOR, 7.0f, trackingOk = true))
+    }
 }

@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.core.MeasurementSource
 import uniffi.core.Point3
 
 /**
@@ -213,5 +214,55 @@ class MeasureStateMachineTest {
                 )
             }
         }
+    }
+
+    // --- Gate 4.2: sensor-estimate source tagging (provenance only) ---
+
+    @Test
+    fun plainTapHitStillDefaultsToFeaturePointSource() {
+        // Regression: the pre-gate-4.2 call shape must produce FEATURE_POINT.
+        val result = MeasureMachine.transition(
+            MeasureState.SelectingFirstPoint,
+            MeasureAction.TapHit(p1),
+            stubDistance,
+        )
+        assertEquals(MeasureState.Measuring(p1, MeasurementSource.FEATURE_POINT), result)
+    }
+
+    @Test
+    fun sensorSourceTagPropagatesFromTapHitToMeasuring() {
+        val result = MeasureMachine.transition(
+            MeasureState.SelectingFirstPoint,
+            MeasureAction.TapHit(p1, MeasurementSource.SENSOR),
+            stubDistance,
+        )
+        assertEquals(MeasureState.Measuring(p1, MeasurementSource.SENSOR), result)
+    }
+
+    @Test
+    fun completeSourceIsSensorIfEitherEndpointIsEstimated() {
+        // Estimated start + real end.
+        val estimatedStart = MeasureMachine.transition(
+            MeasureState.Measuring(p1, MeasurementSource.SENSOR),
+            MeasureAction.TapHit(p2),
+            mathDistance,
+        ) as MeasureState.Complete
+        assertEquals(MeasurementSource.SENSOR, estimatedStart.source)
+
+        // Real start + estimated end (the blank-wall second tap).
+        val estimatedEnd = MeasureMachine.transition(
+            MeasureState.Measuring(p1),
+            MeasureAction.TapHit(p2, MeasurementSource.SENSOR),
+            mathDistance,
+        ) as MeasureState.Complete
+        assertEquals(MeasurementSource.SENSOR, estimatedEnd.source)
+
+        // Both real -> unchanged provenance.
+        val bothReal = MeasureMachine.transition(
+            MeasureState.Measuring(p1),
+            MeasureAction.TapHit(p2),
+            mathDistance,
+        ) as MeasureState.Complete
+        assertEquals(MeasurementSource.FEATURE_POINT, bothReal.source)
     }
 }
